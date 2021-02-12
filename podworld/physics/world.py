@@ -1,25 +1,36 @@
-from typing import Iterator, Callable, Any
+from typing import Iterable, Callable, Any, Dict, Union, Sequence, Iterator
 import pymunk
 import time
+import numpy as np
 from .body import Body
 
 class World:
-    def __init__(self, xmax:int, ymax:int, gravityx:float=0.0, gravityy:float=0.0)->None:
+    OBS_MODE_RGB='RGB'
+    OBS_MODE_RGBA='RGBA'
+    OBS_MODE_RGBD='RGBD'
+    OBS_MODE_RGBAD='RGBAD'
+    OBS_MODE_R='R'
+
+    def __init__(self, name:str, xmax:int, ymax:int, gravityx:float=0.0, gravityy:float=0.0)->None:
         # pymonk has origin on left bottom
+        self.name = name
         self.xmax, self.ymax = xmax, ymax
         self.space = pymunk.Space()
         self.space.gravity = gravityx, gravityy
         self.last_step_time = time.time()
         self.color = (253, 223, 211, 0)
         self.collision_handlers = []
+        self.named_bodies:Dict[str, Body] = {}
 
     def step(self, dt:float=None)->None:
         dt = dt or (time.time() - self.last_step_time)
         self.last_step_time = time.time()
         self.space.step(dt)
 
-    def add(self, body:Body)->None:
+    def add(self, body:Body, name=None)->None:
         self.space.add(body.shape, body.body)
+        if name is not None:
+            self.named_bodies[name] = body
 
     def create_boundry(self, width=100, friction:float=0.0, elasticity:float=1.0, collision_type:int=None)->None:
         xmax, ymax = self.xmax, self.ymax
@@ -41,12 +52,35 @@ class World:
     def get_filter(value:int)->pymunk.ShapeFilter:
         return pymunk.ShapeFilter(mask=pymunk.ShapeFilter.ALL_MASKS ^ value)
 
-    def get_observations(self, body:Body, local_pts:Iterator[tuple], filter:pymunk.ShapeFilter)->Iterator[tuple]:
+    # for each pixel, return RGBA tuple
+    def get_observations(self, body:Body, local_pts:Iterable[tuple], 
+        filter:pymunk.ShapeFilter, obs_mode=OBS_MODE_RGB)->Iterator[tuple]:
+
         start_pt = body.body.position
         for local_pt in local_pts:
             end_pt = body.body.local_to_world(local_pt)
             result = self.space.segment_query_first(start_pt, end_pt, 0, filter)
-            yield result.shape.color if result and result.shape else (0,0,0,0)
+            color, pos = (0,0,0,0), None
+            if result and result.shape:
+                color = result.shape.color
+                pos = result.shape.body.position
+
+            if obs_mode == World.OBS_MODE_R:
+                color = (color[0],)
+            if obs_mode == World.OBS_MODE_RGB or obs_mode == World.OBS_MODE_RGBD:
+                color = color[:3] # remove alpha
+            if obs_mode == World.OBS_MODE_RGBAD or obs_mode == World.OBS_MODE_RGBD:
+                # add distance
+                dist = 1.0
+                if pos is not None:
+                    dist = np.linalg.norm([body.body.position[0]-pos[0], 
+                        body.body.position[1]-pos[1]])
+                color += (dist,)
+            #TODO: check invalid modes
+            yield color
+
+    def get_channel_count(obs_mode)->int:
+        return len(obs_mode)
 
     def set_collision_callback(self, collision_type_a:int, collision_type_b:int, 
         callback:Callable[[pymunk.Arbiter, pymunk.Space, Any],bool], at_begin=True)->None:
@@ -60,6 +94,7 @@ class World:
 
     def end(self):
         self.collision_handlers.clear()
+        self.named_bodies.clear()
         self.space = None
 
     def get_total_momentum(self):
